@@ -1,0 +1,6 @@
+{
+  "name": "stopover-backend",
+  "private": true,
+  "type": "module",
+  "dependencies": {}
+}
