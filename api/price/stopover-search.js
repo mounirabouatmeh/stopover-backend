@@ -1,4 +1,4 @@
-import { flightOffersMultiCity, buildGFlightsDeeplink } from "./_lib/amadeus";
+import { flightOffersMultiCity, buildGFlightsDeeplink } from "../_lib/amadeus";
 
 function* tuples({ depart_window, return_window, z_range, x_range=[0,0], y_range=[0,0] }){
   const [depStart,depEnd]=depart_window.map(d=>new Date(d));
