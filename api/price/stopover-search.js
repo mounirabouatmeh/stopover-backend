@@ -22,7 +22,7 @@ export default async function handler(req, res) {
     let count=0;
 
     for (const t of tuples({ depart_window, return_window, z_range, x_range, y_range })) {
-      if (count>=8) break;
+      if (count>=20) break;
       const d0=t.dep;
       const a1=new Date(d0); a1.setDate(a1.getDate()+t.X);
       const b1=new Date(a1); b1.setDate(b1.getDate()+t.Z);
