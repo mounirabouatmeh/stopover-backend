@@ -1,4 +1,5 @@
-import { flightOffersMultiCity, buildGFlightsDeeplink } from "../_lib/amadeus";
+import { flightOffersMultiCity, buildGFlightsDeeplink } from "../_lib/amadeus.js";
+
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
