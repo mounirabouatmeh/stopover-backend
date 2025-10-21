@@ -112,32 +112,38 @@ export default async function handler(req, res) {
     if (results.length === 0) {
       return res.status(200).json({ currency: "CAD", results: [] });
     }
+// Sort cheapest first
+results.sort((a, b) => a.totalFare - b.totalFare);
 
-    // Sort cheapest first
-    results.sort((a, b) => a.totalFare - b.totalFare);
+// Compute baseline only for the CHEAPEST result to keep latency/cost low
+const cheapest = results[0];
 
-    // Compute baseline only for the CHEAPEST result to keep latency/cost low
-    const cheapest = results[0];
-    const outDate = cheapest.slices[1].date; // T1->BEY  → outbound BEY date
-    const inDate  = cheapest.slices[2].date; // BEY->T1  → inbound BEY date
+// IMPORTANT: align baseline dates to BEY legs (slice 1: T1->BEY, slice 2: BEY->T1)
+const outDate = cheapest.slices[1].date; // outbound BEY date
+const inDate  = cheapest.slices[2].date; // inbound BEY date
 
+let baseline = { fare: null, dates: { outbound: outDate, inbound: inDate } };
 
-    try {
-      const rtData = await flightOffersRoundTripWithToken({
-        host, token, origin, destination: "BEY", outDate, inDate, currency: "CAD"
-      });
-      const rtFirst = rtData?.data?.[0];
-      const baselineFare = rtFirst ? Number(rtFirst?.price?.grandTotal || rtFirst?.price?.total || 0) : null;
+try {
+  const rtData = await flightOffersRoundTripWithToken({
+    host, token, origin, destination: "BEY", outDate, inDate, currency: "CAD"
+  });
+  const rtFirst = rtData?.data?.[0];
+  const baselineFare = rtFirst ? Number(rtFirst?.price?.grandTotal || rtFirst?.price?.total || 0) : null;
 
-      if (baselineFare != null) {
-        cheapest.deltaVsBaseline = Number((cheapest.totalFare - baselineFare).toFixed(2));
-      }
-    } catch {
-      // If baseline fails, we still return the stopover results without delta
-    }
+  baseline.fare = baselineFare;
 
-    return res.status(200).json({ currency: "CAD", results });
-  } catch (e) {
-    return res.status(500).json({ error: "STOPOVER_FAILED", detail: String(e?.message || e) });
+  if (baselineFare != null) {
+    cheapest.deltaVsBaseline = Number((cheapest.totalFare - baselineFare).toFixed(2));
+  }
+} catch {
+  // If baseline fails, we still return stopover results without delta
+}
+
+// Include env + baseline meta so the client can display exactly what we used
+const env = process.env.AMADEUS_ENV || "test";
+return res.status(200).json({ currency: "CAD", env, baseline, results });
+
+    
   }
 }
