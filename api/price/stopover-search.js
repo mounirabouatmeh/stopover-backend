@@ -1,5 +1,10 @@
 // api/price/stopover-search.js
-import { getTokenOnce, flightOffersMultiCityWithToken, buildGFlightsDeeplink } from "../_lib/amadeus.js";
+import {
+  getTokenOnce,
+  flightOffersMultiCityWithToken,
+  flightOffersRoundTripWithToken,
+  buildGFlightsDeeplink
+} from "../_lib/amadeus.js";
 
 /* -------------------------- CORS & Preflight -------------------------- */
 function setCors(res) {
@@ -14,17 +19,13 @@ const iso = (d) => new Date(d).toISOString().slice(0, 10);
 function* tuples({ depart_window, return_window, z_range, x_range = [0, 0], y_range = [0, 0] }) {
   const [depStart, depEnd] = depart_window.map((d) => new Date(d));
   const [retStart, retEnd] = return_window.map((d) => new Date(d));
-
-  // Iterate inside windows; compute Z = total - X - Y
   for (let dep = new Date(depStart); dep <= depEnd; dep.setDate(dep.getDate() + 1)) {
     for (let ret = new Date(retStart); ret <= retEnd; ret.setDate(ret.getDate() + 1)) {
       const totalDays = Math.round((ret - dep) / 86400000);
       for (let X = x_range[0]; X <= x_range[1]; X++) {
         for (let Y = y_range[0]; Y <= y_range[1]; Y++) {
           const Z = totalDays - X - Y;
-          if (Z >= z_range[0] && Z <= z_range[1]) {
-            yield { dep: new Date(dep), ret: new Date(ret), X, Y, Z };
-          }
+          if (Z >= z_range[0] && Z <= z_range[1]) yield { dep: new Date(dep), ret: new Date(ret), X, Y, Z };
         }
       }
     }
@@ -35,11 +36,12 @@ function* tuples({ depart_window, return_window, z_range, x_range = [0, 0], y_ra
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
   try {
     const {
       origin,
-      t1 = "CDG",               // default stopover: Paris
+      t1, // user may provide (e.g., "ATH", "CDG"). If missing, we will default to "CDG" below.
       z_range,
       x_range = [0, 0],
       y_range = [0, 0],
@@ -47,37 +49,35 @@ export default async function handler(req, res) {
       return_window
     } = req.body || {};
 
-    // Basic validation
     if (!origin || !Array.isArray(depart_window) || !Array.isArray(return_window) || !Array.isArray(z_range)) {
       return res.status(400).json({
         error: "BAD_REQUEST",
-        detail: "Required: origin, depart_window [start,end], return_window [start,end], z_range [min,max]. Optional: t1 (default CDG), x_range, y_range."
+        detail: "Required: origin, depart_window [start,end], return_window [start,end], z_range [min,max]. Optional: t1 (stopover), x_range, y_range."
       });
     }
 
-    // Get OAuth token ONCE per request
+    const stopover = t1 || "CDG"; // let the user decide; default to CDG only if absent
     const { token, host } = await getTokenOnce();
 
     const results = [];
     let tried = 0;
-    const MAX_TUPLES = 6;       // lower cap to ensure fast response
-    const STOP_ON_FIRST = true; // return immediately after first valid offer
+    const MAX_TUPLES = 10;        // safe cap for speed
+    const STOP_ON_FIRST = false;  // collect several, then baseline only for the cheapest
 
     for (const t of tuples({ depart_window, return_window, z_range, x_range, y_range })) {
       if (tried >= MAX_TUPLES) break;
       tried++;
 
-      // Derive dates for the 4 legs
-      const d0 = t.dep;                                    // A -> T1
+      const d0 = t.dep;                                 // A -> T1
       const a1 = new Date(d0); a1.setDate(a1.getDate() + t.X); // T1 -> BEY
       const b1 = new Date(a1); b1.setDate(b1.getDate() + t.Z); // BEY -> T1
       const a2 = new Date(b1); a2.setDate(a2.getDate() + t.Y); // T1 -> A
 
       const originDestinations = [
-        { id: "1", originLocationCode: origin, destinationLocationCode: t1,   departureDateTimeRange: { date: iso(d0) } },
-        { id: "2", originLocationCode: t1,     destinationLocationCode: "BEY", departureDateTimeRange: { date: iso(a1) } },
-        { id: "3", originLocationCode: "BEY",  destinationLocationCode: t1,   departureDateTimeRange: { date: iso(b1) } },
-        { id: "4", originLocationCode: t1,     destinationLocationCode: origin, departureDateTimeRange: { date: iso(a2) } },
+        { id: "1", originLocationCode: origin, destinationLocationCode: stopover, departureDateTimeRange: { date: iso(d0) } },
+        { id: "2", originLocationCode: stopover, destinationLocationCode: "BEY",  departureDateTimeRange: { date: iso(a1) } },
+        { id: "3", originLocationCode: "BEY",  destinationLocationCode: stopover, departureDateTimeRange: { date: iso(b1) } },
+        { id: "4", originLocationCode: stopover, destinationLocationCode: origin, departureDateTimeRange: { date: iso(a2) } },
       ];
 
       try {
@@ -85,36 +85,56 @@ export default async function handler(req, res) {
         const first = data?.data?.[0];
         if (first) {
           const totalFare = Number(first?.price?.grandTotal || first?.price?.total || 0);
-
-          const record = {
+          results.push({
             totalFare,
-            deltaVsBaseline: null,
+            deltaVsBaseline: null, // filled later for the cheapest only
             slices: [
-              { from: origin, to: t1,    date: iso(d0) },
-              { from: t1,     to: "BEY", date: iso(a1) },
-              { from: "BEY",  to: t1,    date: iso(b1) },
-              { from: t1,     to: origin, date: iso(a2) },
+              { from: origin, to: stopover, date: iso(d0) },
+              { from: stopover, to: "BEY",  date: iso(a1) },
+              { from: "BEY",  to: stopover, date: iso(b1) },
+              { from: stopover, to: origin, date: iso(a2) },
             ],
             durations: first?.itineraries?.map(i => i.duration) ?? [],
             overnights: false,
             alliance: null,
-            bookingDeeplink: buildGFlightsDeeplink(origin, t1, "BEY", [d0, a1, b1, a2]),
+            bookingDeeplink: buildGFlightsDeeplink(origin, stopover, "BEY", [d0, a1, b1, a2]),
             notes: "Sandbox data if AMADEUS_ENV=test"
-          };
+          });
 
-          results.push(record);
-          if (STOP_ON_FIRST) {
-            return res.status(200).json({ currency: "CAD", results });
-          }
+          if (STOP_ON_FIRST) break;
         }
-      } catch (e) {
-        // Swallow tuple error and continue; timeouts or 4xx/5xx will fall through
-        continue;
+      } catch {
+        // ignore tuple on failure; continue
       }
     }
 
-    // Sort (if we didn't stop on first) and return
+    // If nothing found, return quickly
+    if (results.length === 0) {
+      return res.status(200).json({ currency: "CAD", results: [] });
+    }
+
+    // Sort cheapest first
     results.sort((a, b) => a.totalFare - b.totalFare);
+
+    // Compute baseline only for the CHEAPEST result to keep latency/cost low
+    const cheapest = results[0];
+    const outDate = cheapest.slices[0].date; // A->T1 depart date ~ outbound
+    const inDate  = cheapest.slices[3].date; // T1->A return date ~ inbound
+
+    try {
+      const rtData = await flightOffersRoundTripWithToken({
+        host, token, origin, destination: "BEY", outDate, inDate, currency: "CAD"
+      });
+      const rtFirst = rtData?.data?.[0];
+      const baselineFare = rtFirst ? Number(rtFirst?.price?.grandTotal || rtFirst?.price?.total || 0) : null;
+
+      if (baselineFare != null) {
+        cheapest.deltaVsBaseline = Number((cheapest.totalFare - baselineFare).toFixed(2));
+      }
+    } catch {
+      // If baseline fails, we still return the stopover results without delta
+    }
+
     return res.status(200).json({ currency: "CAD", results });
   } catch (e) {
     return res.status(500).json({ error: "STOPOVER_FAILED", detail: String(e?.message || e) });
