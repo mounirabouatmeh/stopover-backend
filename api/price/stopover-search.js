@@ -118,8 +118,9 @@ export default async function handler(req, res) {
 
     // Compute baseline only for the CHEAPEST result to keep latency/cost low
     const cheapest = results[0];
-    const outDate = cheapest.slices[0].date; // A->T1 depart date ~ outbound
-    const inDate  = cheapest.slices[3].date; // T1->A return date ~ inbound
+    const outDate = cheapest.slices[1].date; // T1->BEY  → outbound BEY date
+    const inDate  = cheapest.slices[2].date; // BEY->T1  → inbound BEY date
+
 
     try {
       const rtData = await flightOffersRoundTripWithToken({
