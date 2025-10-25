@@ -1,175 +1,217 @@
-// api/price/stopover-search.js
+// /api/price/stopover-search.js
+// Builds multi-city tuples A -> T1 -> DEST -> T1 -> A with dynamic dest,
+// compares vs baseline, returns sorted cheapest itineraries with deeplinks.
+
 import {
-  getTokenOnce,
   flightOffersMultiCityWithToken,
   flightOffersRoundTripWithToken,
   buildGFlightsDeeplink,
 } from "../_lib/amadeus.js";
 
-/* -------------------------- CORS & Preflight -------------------------- */
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-
-/* -------------------------- Helpers -------------------------- */
-const iso = (d) => new Date(d).toISOString().slice(0, 10);
-
-function* tuples({ depart_window, return_window, z_range, x_range = [0, 0], y_range = [0, 0] }) {
-  const [depStart, depEnd] = depart_window.map((d) => new Date(d));
-  const [retStart, retEnd] = return_window.map((d) => new Date(d));
-  for (let dep = new Date(depStart); dep <= depEnd; dep.setDate(dep.getDate() + 1)) {
-    for (let ret = new Date(retStart); ret <= retEnd; ret.setDate(ret.getDate() + 1)) {
-      const totalDays = Math.round((ret - dep) / 86400000);
-      for (let X = x_range[0]; X <= x_range[1]; X++) {
-        for (let Y = y_range[0]; Y <= y_range[1]; Y++) {
-          const Z = totalDays - X - Y;
-          if (Z >= z_range[0] && Z <= z_range[1]) {
-            yield { dep: new Date(dep), ret: new Date(ret), X, Y, Z };
-          }
-        }
-      }
-    }
-  }
-}
-
-/* -------------------------- Handler -------------------------- */
 export default async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
-
   try {
-    const {
-      origin,
-      t1, // user-chosen stopover IATA (e.g., "ATH", "CDG"). If missing, fallback to CDG.
-      z_range,
-      x_range = [0, 0],
-      y_range = [0, 0],
-      depart_window,
-      return_window,
-    } = req.body || {};
-
-    // Basic validation
-    if (
-      !origin ||
-      !Array.isArray(depart_window) ||
-      !Array.isArray(return_window) ||
-      !Array.isArray(z_range)
-    ) {
-      return res.status(400).json({
-        error: "BAD_REQUEST",
-        detail:
-          "Required: origin, depart_window [start,end], return_window [start,end], z_range [min,max]. Optional: t1 (stopover IATA), x_range, y_range.",
-      });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const stopover = t1 || "CDG"; // default only if user didn’t provide
-    const { token, host } = await getTokenOnce();
+    const {
+      origin,          // e.g., "YUL"
+      t1,              // stopover hub, e.g., "CDG" or "ATH"
+      dest,            // <-- NEW dynamic destination, e.g., "BEY" (no longer hard-coded)
+      depart_window,   // ["YYYY-MM-DD","YYYY-MM-DD"]
+      return_window,   // ["YYYY-MM-DD","YYYY-MM-DD"]
+      z_range,         // [minDaysInDest, maxDaysInDest]
+      x_range = [0, 2],// [min pre-stopover days at T1]
+      y_range = [0, 2],// [min post-stopover days at T1]
+      adults = 1,
+      currency = "CAD",
+      cabin = "ECONOMY",
+      max_tuples = 30, // safety cap
+    } = await parseBody(req);
 
+    // Validate
+    assertIata(origin, "origin");
+    assertIata(t1, "t1");
+    assertIata(dest, "dest"); // required now
+    assertDateRange(depart_window, "depart_window");
+    assertDateRange(return_window, "return_window");
+    assertNumRange(z_range, "z_range");
+
+    // Generate candidate tuples
+    const tuples = buildTuples({
+      departRange: depart_window,
+      returnRange: return_window,
+      xRange: x_range,
+      zRange: z_range,
+      yRange: y_range,
+      maxTuples: max_tuples,
+    });
+
+    // Query multi-city offers per tuple
     const results = [];
-    let tried = 0;
-    const MAX_TUPLES = 10; // keep modest for speed
-    const STOP_ON_FIRST = false;
-
-    for (const t of tuples({ depart_window, return_window, z_range, x_range, y_range })) {
-      if (tried >= MAX_TUPLES) break;
-      tried++;
-
-      // Derive the four slice dates
-      const d0 = t.dep; // A -> T1
-      const a1 = new Date(d0);
-      a1.setDate(a1.getDate() + t.X); // T1 -> BEY
-      const b1 = new Date(a1);
-      b1.setDate(b1.getDate() + t.Z); // BEY -> T1
-      const a2 = new Date(b1);
-      a2.setDate(a2.getDate() + t.Y); // T1 -> A
-
-      const originDestinations = [
-        { id: "1", originLocationCode: origin, destinationLocationCode: stopover, departureDateTimeRange: { date: iso(d0) } },
-        { id: "2", originLocationCode: stopover, destinationLocationCode: "BEY",  departureDateTimeRange: { date: iso(a1) } },
-        { id: "3", originLocationCode: "BEY",  destinationLocationCode: stopover, departureDateTimeRange: { date: iso(b1) } },
-        { id: "4", originLocationCode: stopover, destinationLocationCode: origin, departureDateTimeRange: { date: iso(a2) } },
+    for (const t of tuples) {
+      // slices: [A->T1, T1->DEST, DEST->T1, T1->A]
+      const slices = [
+        { origin, dest: t1,  date: t.a_to_t1 },
+        { origin: t1, dest,  date: t.t1_to_dest },
+        { origin: dest, dest: t1, date: t.dest_to_t1 },
+        { origin: t1, dest: origin, date: t.t1_to_a },
       ];
 
       try {
-        const data = await flightOffersMultiCityWithToken({
-          host,
-          token,
-          originDestinations,
-          currency: "CAD",
+        const multi = await flightOffersMultiCityWithToken({
+          slices,
+          adults,
+          currencyCode: currency,
+          cabin,
         });
+        const cheapest = pickCheapest(multi);
+        if (!cheapest) continue;
 
-        const first = data?.data?.[0];
-        if (first) {
-          const totalFare = Number(first?.price?.grandTotal || first?.price?.total || 0);
+        // Align baseline to the DEST leg arrival/departure (best-effort)
+        const baselineJson = await flightOffersRoundTripWithToken({
+          origin,
+          dest,
+          departDate: t.t1_to_dest,  // first arrival into DEST date baseline approx
+          returnDate: t.dest_to_t1,  // first departure out of DEST date baseline approx
+          adults,
+          currencyCode: currency,
+          cabin,
+        });
+        const baseline = extractCheapest(baselineJson);
 
-          results.push({
-            totalFare,
-            deltaVsBaseline: null, // filled later for the cheapest only
-            slices: [
-              { from: origin, to: stopover, date: iso(d0) },
-              { from: stopover, to: "BEY", date: iso(a1) },
-              { from: "BEY", to: stopover, date: iso(b1) },
-              { from: stopover, to: origin, date: iso(a2) },
-            ],
-            durations: first?.itineraries?.map((i) => i.duration) ?? [],
-            overnights: false,
-            alliance: null,
-            bookingDeeplink: buildGFlightsDeeplink(origin, stopover, "BEY", [d0, a1, b1, a2]),
-            notes: "Sandbox data if AMADEUS_ENV=test",
-          });
-
-          if (STOP_ON_FIRST) break;
-        }
-      } catch {
-        // Ignore this tuple on failure; continue with the next
+        results.push({
+          tuple: t,
+          price: cheapest?.total ?? null,
+          currency,
+          deeplink: buildGFlightsDeeplink({ slices }),
+          baseline,
+          delta_vs_baseline:
+            baseline?.total ? (Number(cheapest?.total ?? 0) - Number(baseline.total)) : null,
+          validatingAirlineCodes: cheapest?.validatingAirlineCodes ?? [],
+        });
+      } catch (e) {
+        // Skip tuple on failure, continue
+        // (You can log e.message to an observability sink if desired)
       }
     }
 
-    if (results.length === 0) {
-      const env = process.env.AMADEUS_ENV || "test";
-      return res.status(200).json({ currency: "CAD", env, baseline: { fare: null, dates: null }, results: [] });
-    }
+    // Sort by cheapest total
+    results.sort((a, b) => Number(a.price ?? Infinity) - Number(b.price ?? Infinity));
 
-    // Sort cheapest first
-    results.sort((a, b) => a.totalFare - b.totalFare);
-
-    // Compute baseline ONLY for the CHEAPEST result to keep latency + cost low
-    const cheapest = results[0];
-
-    // Align baseline to the BEY legs (slice 1: T1->BEY = outbound; slice 2: BEY->T1 = inbound)
-    const outDate = cheapest.slices[1].date;
-    const inDate = cheapest.slices[2].date;
-
-    let baseline = { fare: null, dates: { outbound: outDate, inbound: inDate } };
-
-    try {
-      const rtData = await flightOffersRoundTripWithToken({
-        host,
-        token,
-        origin,
-        destination: "BEY",
-        outDate,
-        inDate,
-        currency: "CAD",
-      });
-      const rtFirst = rtData?.data?.[0];
-      const baselineFare = rtFirst ? Number(rtFirst?.price?.grandTotal || rtFirst?.price?.total || 0) : null;
-
-      baseline.fare = baselineFare;
-
-      if (baselineFare != null) {
-        cheapest.deltaVsBaseline = Number((cheapest.totalFare - baselineFare).toFixed(2));
-      }
-    } catch {
-      // If baseline fails, we still return the stopover results without delta
-    }
-
-    const env = process.env.AMADEUS_ENV || "test";
-    return res.status(200).json({ currency: "CAD", env, baseline, results });
-  } catch (e) {
-    return res.status(500).json({ error: "STOPOVER_FAILED", detail: String(e?.message || e) });
+    return res.status(200).json({
+      env: process.env.AMADEUS_ENV || "test",
+      currency,
+      origin,
+      t1,
+      dest, // echo back
+      constraints: { depart_window, return_window, x_range, z_range, y_range, cabin, adults },
+      baseline_hint: "Baseline computed per-tuple using DEST segment dates.",
+      results,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || String(err) });
   }
+}
+
+async function parseBody(req) {
+  try {
+    return typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+  } catch {
+    return {};
+  }
+}
+
+function assertIata(code, label) {
+  if (!code || typeof code !== "string" || code.length !== 3) {
+    throw new Error(`${label} must be a 3-letter IATA code`);
+  }
+}
+function assertDateRange(r, label) {
+  if (!Array.isArray(r) || r.length !== 2) {
+    throw new Error(`${label} must be ["YYYY-MM-DD","YYYY-MM-DD"]`);
+  }
+}
+function assertNumRange(r, label) {
+  if (!Array.isArray(r) || r.length !== 2) {
+    throw new Error(`${label} must be [min,max]`);
+  }
+}
+
+// Naive date helpers (YYYY-MM-DD only)
+function addDays(iso, d) {
+  const dt = new Date(iso + "T00:00:00Z");
+  dt.setUTCDate(dt.getUTCDate() + d);
+  return dt.toISOString().slice(0, 10);
+}
+function daysBetween(a, b) {
+  const A = new Date(a + "T00:00:00Z");
+  const B = new Date(b + "T00:00:00Z");
+  return Math.round((B - A) / 86400000);
+}
+
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// Build tuples ensuring chronological order across windows and x/z/y constraints.
+function buildTuples({ departRange, returnRange, xRange, zRange, yRange, maxTuples }) {
+  const [departStart, departEnd] = departRange;
+  const [returnStart, returnEnd] = returnRange;
+
+  const tuples = [];
+  const maxPerStart = Math.max(1, Math.floor(maxTuples / 5));
+
+  // Iterate possible outbound start days within depart window
+  const totalDepartDays = clamp(daysBetween(departStart, departEnd) + 1, 1, 31);
+  for (let d = 0; d < totalDepartDays; d++) {
+    const a_to_t1 = addDays(departStart, d);
+
+    // Try a few x (pre-stopover days at T1)
+    for (let x = xRange[0]; x <= xRange[1]; x++) {
+      const t1_to_dest = addDays(a_to_t1, Math.max(0, x));
+
+      // Try z (days in DEST)
+      for (let z = zRange[0]; z <= zRange[1]; z++) {
+        const dest_to_t1 = addDays(t1_to_dest, Math.max(1, z));
+
+        // Try y (post-stopover days at T1)
+        for (let y = yRange[0]; y <= yRange[1]; y++) {
+          const t1_to_a = addDays(dest_to_t1, Math.max(0, y));
+
+          // Must fit inside return window
+          if (t1_to_a < returnStart || t1_to_a > returnEnd) continue;
+
+          tuples.push({ a_to_t1, t1_to_dest, dest_to_t1, t1_to_a, x, z, y });
+          if (tuples.length >= maxTuples) return tuples;
+        }
+      }
+    }
+
+    if (tuples.length >= maxPerStart) continue; // limit fan-out per start day
+  }
+  return tuples.slice(0, maxTuples);
+}
+
+function pickCheapest(json) {
+  const offers = Array.isArray(json?.data) ? json.data : [];
+  if (!offers.length) return null;
+  offers.sort((a, b) => Number(a?.price?.total ?? Infinity) - Number(b?.price?.total ?? Infinity));
+  const top = offers[0];
+  return {
+    total: top?.price?.total ?? null,
+    currency: top?.price?.currency ?? null,
+    validatingAirlineCodes: top?.validatingAirlineCodes ?? [],
+  };
+}
+function extractCheapest(json) {
+  const offers = Array.isArray(json?.data) ? json.data : [];
+  if (!offers.length) return null;
+  offers.sort((a, b) => Number(a?.price?.total ?? Infinity) - Number(b?.price?.total ?? Infinity));
+  const top = offers[0];
+  return {
+    total: top?.price?.total ?? null,
+    currency: top?.price?.currency ?? null,
+    validatingAirlineCodes: top?.validatingAirlineCodes ?? [],
+  };
 }
