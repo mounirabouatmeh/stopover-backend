@@ -5,7 +5,6 @@ import { fetchWithTimeout } from "./http.js";
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// Pick base URL depending on AMADEUS_ENV
 function getBaseUrl() {
   const env = (process.env.AMADEUS_ENV || "production").toLowerCase();
   return env === "test"
@@ -13,9 +12,6 @@ function getBaseUrl() {
     : "https://api.amadeus.com";
 }
 
-/**
- * Retrieve and cache Amadeus OAuth2 token
- */
 export async function getToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
 
@@ -31,7 +27,6 @@ export async function getToken() {
   });
 
   const data = await res.json();
-
   if (!res.ok || !data?.access_token) {
     throw new Error(
       `Amadeus token error: ${res.status} ${JSON.stringify(data)}`
@@ -43,9 +38,6 @@ export async function getToken() {
   return cachedToken;
 }
 
-/**
- * Get round-trip baseline offers
- */
 export async function flightOffersRoundTrip({
   origin,
   dest,
@@ -67,16 +59,7 @@ export async function flightOffersRoundTrip({
   return res.json();
 }
 
-/**
- * Get multi-city stopover offers
- * legs = [{ origin, destination, departureDate }, ...]
- */
-export async function flightOffersMultiCity({
-  legs,
-  adults,
-  cabin,
-  currency
-}) {
+export async function flightOffersMultiCity({ legs, adults, cabin, currency }) {
   const token = await getToken();
   const baseUrl = getBaseUrl();
 
@@ -92,8 +75,7 @@ export async function flightOffersMultiCity({
       originLocationCode: leg.origin,
       destinationLocationCode: leg.destination,
       departureDateTimeRange: {
-        date: leg.departureDate,
-        time: "00:00:00-23:59:59"
+        date: leg.departureDate // ✅ only date, no time
       }
     })),
     searchCriteria: {
@@ -101,7 +83,7 @@ export async function flightOffersMultiCity({
         cabinRestrictions: [
           {
             cabin,
-            originDestinationIds: []
+            originDestinationIds: legs.map((_, idx) => String(idx + 1)) // ✅ ["1","2","3","4"]
           }
         ]
       },
