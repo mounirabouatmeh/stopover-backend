@@ -1,90 +1,72 @@
-// /api/price/baseline.js
-// Returns a direct round-trip baseline fare between origin and dest
-// Uses earliest dates if ranges are provided.
+// api/price/baseline.js
 
-import { flightOffersRoundTripWithToken } from "../_lib/amadeus.js";
+import { checkAuth } from "../_lib/auth.js";
+import { flightOffersRoundTrip } from "../_lib/amadeus.js";
 
 export default async function handler(req, res) {
+  // Enforce bearer auth
+  if (!checkAuth(req, res)) return;
+
+  const {
+    origin,
+    dest,
+    depart_window,
+    return_window,
+    adults = 1,
+    cabin = "ECONOMY",
+    currency = "CAD"
+  } = req.body;
+
+  const departDate = depart_window?.[0];
+  const returnDate = return_window?.[0];
+
+  if (!origin || !dest || !departDate || !returnDate) {
+    return res.status(400).json({
+      error: "Missing required fields: origin, dest, depart_window[0], return_window[0]"
+    });
+  }
+
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
-    const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    const {
-      origin,
-      dest,
-      depart_window,
-      return_window,
-      adults = 1,
-      cabin = "ECONOMY",
-      currency = "CAD"
-    } = body;
-
-    // --- basic validation ---
-    if (!origin || origin.length !== 3) throw new Error("origin required");
-    if (!dest || dest.length !== 3) throw new Error("dest required");
-    if (!depart_window || !return_window)
-      throw new Error("depart_window and return_window required");
-
-    // normalize single date or window array
-    const departDate = Array.isArray(depart_window)
-      ? depart_window[0]
-      : depart_window;
-    const returnDate = Array.isArray(return_window)
-      ? return_window[1]
-      : return_window;
-
-    // call Amadeus for direct round-trip
-    const baselineJson = await flightOffersRoundTripWithToken({
+    const data = await flightOffersRoundTrip({
       origin,
       dest,
       departDate,
       returnDate,
       adults,
-      currencyCode: currency,
-      cabin
+      cabin,
+      currency
     });
 
-    const offers = Array.isArray(baselineJson?.data)
-      ? baselineJson.data
-      : [];
-    if (!offers.length)
-      return res.status(200).json({
-        env: process.env.AMADEUS_ENV || "test",
-        origin,
-        dest,
-        departDate,
-        returnDate,
-        message: "No baseline offers found",
-        results: []
-      });
+    const offers = data?.data ?? [];
 
-    // sort by cheapest
-    offers.sort(
-      (a, b) =>
-        Number(a?.price?.total ?? Infinity) -
-        Number(b?.price?.total ?? Infinity)
+    if (!offers.length) {
+      return res.json({
+        error: "No offers found",
+        query: { origin, dest, departDate, returnDate, adults, cabin }
+      });
+    }
+
+    // Pick the cheapest offer explicitly
+    const cheapest = offers.reduce(
+      (min, o) =>
+        parseFloat(o.price.total) < parseFloat(min.price.total) ? o : min,
+      offers[0]
     );
 
-    const cheapest = offers[0];
-    const response = {
-      env: process.env.AMADEUS_ENV || "test",
+    return res.json({
       currency,
       query: { origin, dest, departDate, returnDate, adults, cabin },
       baseline: {
-        total: cheapest?.price?.total,
-        currency: cheapest?.price?.currency,
-        validatingAirlineCodes: cheapest?.validatingAirlineCodes ?? []
-      },
-      rawCount: offers.length
-    };
-
-    return res.status(200).json(response);
+        total: cheapest.price.total,
+        currency,
+        validatingAirlineCodes: cheapest.validatingAirlineCodes
+      }
+    });
   } catch (err) {
-    return res
-      .status(500)
-      .json({ error: err.message || String(err), env: process.env.AMADEUS_ENV });
+    console.error("Baseline error:", err);
+    return res.status(502).json({
+      error: "Failed to fetch baseline offers",
+      details: err.message
+    });
   }
 }
