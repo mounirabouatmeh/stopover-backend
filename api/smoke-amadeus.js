@@ -1,21 +1,22 @@
-// /api/smoke-amadeus.js
-import { getTokenOnce } from "./_lib/amadeus.js";
+// api/smoke-amadeus.js
+
+import { getToken } from "./_lib/amadeus.js";
 
 export default async function handler(req, res) {
   try {
-    const token = await getTokenOnce(); // fetch OAuth token from Amadeus
-    return res.status(200).json({
+    const token = await getToken();
+    res.json({
       ok: true,
-      env: process.env.AMADEUS_ENV || "test",
-      token_preview: token ? `...${String(token).slice(-8)}` : null,
-      token_length: token ? String(token).length : 0,
-      note: "Amadeus OAuth succeeded"
+      env: process.env.AMADEUS_ENV,
+      token_preview: token.slice(0, 8) + "...",
+      token_length: token.length
     });
-  } catch (e) {
-    return res.status(500).json({
+  } catch (err) {
+    console.error("Smoke test error:", err);
+    res.status(502).json({
       ok: false,
-      env: process.env.AMADEUS_ENV || "test",
-      error: e.message || String(e)
+      error: "Failed to fetch Amadeus token",
+      details: err.message
     });
   }
 }
