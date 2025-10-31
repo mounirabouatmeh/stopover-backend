@@ -1,6 +1,5 @@
 // api/_lib/amadeus.js
 
-import fetch from "node-fetch";
 import { fetchWithTimeout } from "./http.js";
 
 let cachedToken = null;
