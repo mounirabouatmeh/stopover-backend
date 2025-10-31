@@ -81,3 +81,60 @@ export default async function handler(req, res) {
           (min, o) =>
             parseFloat(o.price.total) < parseFloat(min.price.total) ? o : min,
           baselineOffers[0]
+        )
+      : null;
+
+    // Multi-city
+    const multiData = await flightOffersMultiCity({ legs, adults, cabin, currency });
+
+    if (multiData?.errors?.length) {
+      return res.status(502).json({
+        error: "Amadeus returned errors for multi-city search",
+        amadeus_errors: multiData.errors,
+        request_legs: legs
+      });
+    }
+
+    const offers = multiData?.data ?? [];
+    if (!offers.length) {
+      return res.json({
+        env: process.env.AMADEUS_ENV,
+        origin,
+        t1,
+        dest,
+        request_legs: legs,
+        info: "No multi-city offers returned by Amadeus",
+        baseline: baselineCheapest
+          ? { total: baselineCheapest.price.total, currency }
+          : null
+      });
+    }
+
+    const results = offers.map(o => ({
+      price: o.price.total,
+      currency,
+      deeplink: "https://www.google.com/flights?hl=en",
+      baseline: baselineCheapest
+        ? { total: baselineCheapest.price.total, currency }
+        : null,
+      delta_vs_baseline: baselineCheapest
+        ? parseFloat(o.price.total) - parseFloat(baselineCheapest.price.total)
+        : null
+    }));
+
+    return res.json({
+      env: process.env.AMADEUS_ENV,
+      origin,
+      t1,
+      dest,
+      request_legs: legs,
+      results
+    });
+  } catch (err) {
+    console.error("Stopover search error:", err);
+    return res.status(502).json({
+      error: "Failed to fetch stopover offers",
+      details: err.message
+    });
+  }
+}
