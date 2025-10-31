@@ -6,13 +6,22 @@ import { fetchWithTimeout } from "./http.js";
 let cachedToken = null;
 let tokenExpiry = 0;
 
+// Pick base URL depending on AMADEUS_ENV
+function getBaseUrl() {
+  const env = (process.env.AMADEUS_ENV || "production").toLowerCase();
+  return env === "test"
+    ? "https://test.api.amadeus.com"
+    : "https://api.amadeus.com";
+}
+
 /**
  * Retrieve and cache Amadeus OAuth2 token
  */
 export async function getToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
 
-  const res = await fetch("https://api.amadeus.com/v1/security/oauth2/token", {
+  const baseUrl = getBaseUrl();
+  const res = await fetch(`${baseUrl}/v1/security/oauth2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -48,8 +57,9 @@ export async function flightOffersRoundTrip({
   currency
 }) {
   const token = await getToken();
+  const baseUrl = getBaseUrl();
 
-  const url = `https://api.amadeus.com/v2/shopping/flight-offers?originLocationCode=${origin}&destinationLocationCode=${dest}&departureDate=${departDate}&returnDate=${returnDate}&adults=${adults}&travelClass=${cabin}&currencyCode=${currency}&max=50`;
+  const url = `${baseUrl}/v2/shopping/flight-offers?originLocationCode=${origin}&destinationLocationCode=${dest}&departureDate=${departDate}&returnDate=${returnDate}&adults=${adults}&travelClass=${cabin}&currencyCode=${currency}&max=50`;
 
   const res = await fetchWithTimeout(url, {
     headers: { Authorization: `Bearer ${token}` }
@@ -69,6 +79,7 @@ export async function flightOffersMultiCity({
   currency
 }) {
   const token = await getToken();
+  const baseUrl = getBaseUrl();
 
   const body = {
     currencyCode: currency,
@@ -90,8 +101,8 @@ export async function flightOffersMultiCity({
       flightFilters: {
         cabinRestrictions: [
           {
-            cabin, // ECONOMY, BUSINESS, etc.
-            originDestinationIds: [] // apply to all legs
+            cabin,
+            originDestinationIds: []
           }
         ]
       },
@@ -99,17 +110,14 @@ export async function flightOffersMultiCity({
     }
   };
 
-  const res = await fetchWithTimeout(
-    "https://api.amadeus.com/v2/shopping/flight-offers",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    }
-  );
+  const res = await fetchWithTimeout(`${baseUrl}/v2/shopping/flight-offers`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
 
   return res.json();
 }
