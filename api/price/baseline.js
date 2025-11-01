@@ -9,11 +9,6 @@ function parseDate(s) {
 function fmtDate(d) {
   return d.toISOString().slice(0, 10);
 }
-function addDays(s, n) {
-  const d = parseDate(s);
-  d.setUTCDate(d.getUTCDate() + n);
-  return fmtDate(d);
-}
 
 /**
  * Iterate through all departure/return date pairs in the given windows,
