@@ -13,7 +13,6 @@ function fmtDate(d) {
 /**
  * Iterate through all departure/return date pairs in the given windows,
  * call Amadeus for each, and return the cheapest overall itinerary.
- * Includes debug logging so you can verify in Vercel logs which pairs were checked.
  */
 export default async function handler(req, res) {
   if (!checkAuth(req, res)) return;
@@ -59,9 +58,6 @@ export default async function handler(req, res) {
         const departDate = fmtDate(d);
         const returnDate = fmtDate(r);
 
-        // 🔍 Debug log before calling Amadeus
-        console.log(`Checking pair: depart=${departDate}, return=${returnDate}`);
-
         const data = await flightOffersRoundTrip({
           origin,
           dest,
@@ -73,12 +69,6 @@ export default async function handler(req, res) {
         });
 
         const offers = data?.data ?? [];
-
-        // 🔍 Debug log after receiving offers
-        console.log(
-          `Offers found: ${offers.length} for ${departDate} → ${returnDate}`
-        );
-
         if (!offers.length) continue;
 
         // Find cheapest in this batch
